@@ -1,0 +1,68 @@
+name: Deploy to Dev Sandbox
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - 'force-app/**'
+      - 'manifest/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://test.salesforce.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      - name: Authenticate to Dev Sandbox
+        run: |
+          echo "${{ secrets.SF_DEV_AUTH_URL }}" > ./authfile.txt
+          sf org login sfdx-url --sfdx-url-file ./authfile.txt --alias dev-sandbox --set-default
+          rm -f ./authfile.txt
+
+      - name: Deploy to Dev Sandbox
+        run: |
+          sf project deploy start \
+            --target-org dev-sandbox \
+            --test-level RunLocalTests \
+            --wait 30
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed to:** Dev Sandbox" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Dev Deployment Failed',
+              body: `Deployment to Dev Sandbox failed.\n\n**Branch:** ${context.ref}\n**Commit:** ${context.sha}\n\n[View workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})`,
+              labels: ['deployment', 'failure']
+            });

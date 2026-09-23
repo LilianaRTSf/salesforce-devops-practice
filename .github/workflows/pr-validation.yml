@@ -1,0 +1,74 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths:
+      - 'force-app/**'
+      - 'manifest/**'
+
+jobs:
+  validate:
+    name: Validate Metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      - name: Install Code Analyzer
+        run: sf plugins install @salesforce/sfdx-scanner
+
+      - name: Run Code Analyzer
+        run: |
+          sf scanner run --target "force-app/**/*.cls,force-app/**/*.trigger,force-app/**/*.js" \
+            --format table \
+            --severity-threshold=3 \
+            --normalize-severity
+
+      - name: Authenticate to Salesforce
+        if: vars.SF_AUTH_URL
+        run: |
+          echo "${{ secrets.SF_AUTH_URL }}" > ./authfile.txt
+          sf org login sfdx-url --sfdx-url-file ./authfile.txt --alias validation-org --set-default
+          rm -f ./authfile.txt
+
+      - name: Validate Deployment (Check Only)
+        if: vars.SF_AUTH_URL
+        run: |
+          sf project deploy start \
+            --dry-run \
+            --test-level RunLocalTests \
+            --target-org validation-org \
+            --wait 30
+
+      - name: Comment PR with validation status
+        if: always() && vars.SF_AUTH_URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}';
+            const body = status === 'success'
+              ? '✅ **Validation Passed** - Metadata is valid and tests passed!'
+              : '❌ **Validation Failed** - Please check the logs for details.';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

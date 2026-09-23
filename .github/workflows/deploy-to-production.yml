@@ -1,0 +1,121 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'force-app/**'
+      - 'manifest/**'
+  workflow_dispatch:
+
+jobs:
+  validate-uat:
+    name: Validate in UAT
+    runs-on: ubuntu-latest
+    environment:
+      name: uat
+      url: https://test.salesforce.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      - name: Authenticate to UAT
+        run: |
+          echo "${{ secrets.SF_UAT_AUTH_URL }}" > ./authfile.txt
+          sf org login sfdx-url --sfdx-url-file ./authfile.txt --alias uat-sandbox --set-default
+          rm -f ./authfile.txt
+
+      - name: Validate in UAT (Check Only)
+        run: |
+          sf project deploy start \
+            --dry-run \
+            --target-org uat-sandbox \
+            --test-level RunLocalTests \
+            --wait 30
+
+  deploy-production:
+    name: Deploy to Production
+    needs: validate-uat
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://login.salesforce.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      - name: Authenticate to Production
+        run: |
+          echo "${{ secrets.SF_PROD_AUTH_URL }}" > ./authfile.txt
+          sf org login sfdx-url --sfdx-url-file ./authfile.txt --alias production --set-default
+          rm -f ./authfile.txt
+
+      - name: Deploy to Production
+        run: |
+          sf project deploy start \
+            --target-org production \
+            --test-level RunLocalTests \
+            --wait 60
+
+      - name: Create GitHub Release
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tagName = `v${new Date().toISOString().split('T')[0].replace(/-/g, '.')}-${context.sha.substring(0, 7)}`;
+
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+              name: `Production Release ${tagName}`,
+              body: `Deployed to production.\n\n**Commit:** ${context.sha}`,
+              draft: false,
+              prerelease: false
+            });
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "### 🚀 Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** Production" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 CRITICAL: Production Deployment Failed',
+              body: `⚠️ **PRODUCTION DEPLOYMENT FAILED** ⚠️\n\n**Branch:** ${context.ref}\n**Commit:** ${context.sha}\n\n[View workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})\n\n**Action Required:** Investigate immediately and determine if rollback is needed.`,
+              labels: ['deployment', 'production', 'critical']
+            });

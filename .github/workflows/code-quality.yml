@@ -1,0 +1,140 @@
+name: Code Quality Checks
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+    paths:
+      - 'force-app/**'
+  pull_request:
+    paths:
+      - 'force-app/**'
+
+jobs:
+  code-analysis:
+    name: Static Code Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      - name: Install Salesforce Code Analyzer
+        run: sf plugins install @salesforce/sfdx-scanner
+
+      - name: Run PMD Analysis on Apex
+        continue-on-error: true
+        run: |
+          sf scanner run \
+            --target "force-app/**/*.cls,force-app/**/*.trigger" \
+            --engine pmd \
+            --category "Design,Best Practices,Code Style,Performance,Security" \
+            --format csv \
+            --outfile pmd-results.csv \
+            --severity-threshold=3
+
+      - name: Run ESLint on LWC/Aura
+        continue-on-error: true
+        run: |
+          sf scanner run \
+            --target "force-app/**/lwc/**/*.js,force-app/**/aura/**/*.js" \
+            --engine eslint-lwc \
+            --format csv \
+            --outfile eslint-results.csv \
+            --severity-threshold=3
+
+      - name: Upload Code Analysis Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-analysis-results
+          path: |
+            pmd-results.csv
+            eslint-results.csv
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      - name: Install Code Analyzer
+        run: sf plugins install @salesforce/sfdx-scanner
+
+      - name: Run Security Analysis
+        run: |
+          sf scanner run \
+            --target "force-app/**/*.cls,force-app/**/*.trigger,force-app/**/*.js" \
+            --engine pmd \
+            --category "Security" \
+            --format table \
+            --severity-threshold=2 \
+            --normalize-severity
+
+  test-coverage:
+    name: Check Test Coverage
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Count Apex Classes and Tests
+        run: |
+          APEX_CLASSES=$(find force-app -name "*.cls" ! -name "*Test.cls" | wc -l)
+          TEST_CLASSES=$(find force-app -name "*Test.cls" | wc -l)
+
+          echo "### Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Apex Classes:** $APEX_CLASSES" >> $GITHUB_STEP_SUMMARY
+          echo "- **Test Classes:** $TEST_CLASSES" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$APEX_CLASSES" -gt 0 ] && [ "$TEST_CLASSES" -eq 0 ]; then
+            echo "⚠️ **Warning:** No test classes found!" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+  quality-gate:
+    name: Quality Gate
+    needs: [code-analysis, security-scan]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check Quality Gate
+        run: |
+          if [[ "${{ needs.code-analysis.result }}" == "failure" ]] || [[ "${{ needs.security-scan.result }}" == "failure" ]]; then
+            echo "❌ Quality gate failed"
+            exit 1
+          else
+            echo "✅ Quality gate passed"
+          fi
